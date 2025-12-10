@@ -1,157 +1,103 @@
 import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_OWNER = 'itsnicko';
-const GITHUB_REPO = 'North-Dakota-TSA-Website';
-const IMAGES_FOLDER = 'images';
+const token = process.env.GITHUB_TOKEN;
+const owner = 'itsnicko';
+const repo = 'North-Dakota-TSA-Website';
+const imagesDir = 'images';
+
+const gh = {
+  headers: {
+    Authorization: `token ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+  },
+  baseUrl: `https://api.github.com/repos/${owner}/${repo}/contents`,
+};
+
+const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9.-]/g, '_');
+
+const buildPath = (folder: string, file: string) => `${folder}/${file}`;
 
 export async function POST(request: NextRequest) {
   try {
-    if (!GITHUB_TOKEN) {
+    if (!token) {
       return NextResponse.json({ error: 'GitHub token not configured' }, { status: 500 });
     }
 
-    const formData = await request.formData();
-    const file = formData.get('file') as File;
-    const oldFileName = formData.get('oldFileName') as string;
-    const folderFromForm = formData.get('folder') as string | null;
+    const form = await request.formData();
+    const file = form.get('file') as File;
+    const oldFile = form.get('oldFileName') as string;
+    const folder = form.get('folder') as string | null;
 
     if (!file) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Generate unique filename
-    const timestamp = Date.now();
-    const originalName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const filename = `${timestamp}-${originalName}`;
-    const folderName = folderFromForm && folderFromForm.trim() ? folderFromForm.trim() : IMAGES_FOLDER;
-    const filepath = `${folderName}/${filename}`;
+    // setup file path
+    const safe = sanitizeFileName(file.name);
+    const newName = `${Date.now()}-${safe}`;
+    const dir = folder?.trim() || imagesDir;
+    const path = buildPath(dir, newName);
 
-    // Convert file to base64
-    const bytes = await file.arrayBuffer();
-    const base64Content = Buffer.from(bytes).toString('base64');
+    // convert to base64
+    const buf = await file.arrayBuffer();
+    const b64 = Buffer.from(buf).toString('base64');
 
-    // Upload to GitHub
-    const uploadResponse = await axios.put(
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filepath}`,
-      {
-        message: `Add image: ${filename}`,
-        content: base64Content,
-        branch: 'main',
-      },
-      {
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-      }
-    );
+    // upload to github
+    await axios.put(`${gh.baseUrl}/${path}`, {
+      message: `Add image: ${newName}`,
+      content: b64,
+      branch: 'main',
+    }, { headers: gh.headers });
 
-    // Delete old file if provided
-    if (oldFileName) {
+    // delete old file if exists
+    if (oldFile) {
       try {
-        const oldFilepath = `${folderName}/${oldFileName}`;
-
-        // Get SHA of old file
-        const getResponse = await axios.get(
-          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${oldFilepath}`,
-          {
-            headers: {
-              Authorization: `token ${GITHUB_TOKEN}`,
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-          }
-        );
-
-        // Delete old file
-        await axios.delete(
-          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${oldFilepath}`,
-          {
-            data: {
-              message: `Delete file: ${oldFileName}`,
-              sha: getResponse.data.sha,
-              branch: 'main',
-            },
-            headers: {
-              Authorization: `token ${GITHUB_TOKEN}`,
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
-          }
-        );
+        const oldPath = buildPath(dir, oldFile);
+        const res = await axios.get(`${gh.baseUrl}/${oldPath}`, { headers: gh.headers });
+        await axios.delete(`${gh.baseUrl}/${oldPath}`, {
+          data: { message: `Delete: ${oldFile}`, sha: res.data.sha, branch: 'main' },
+          headers: gh.headers,
+        });
       } catch (err) {
-        console.error('Error deleting old file:', err);
-        // Continue even if delete fails
+        console.error('delete old file failed:', err);
       }
     }
 
-    // Return relative path for storage in JSON (frontend will normalize to GitHub Pages URL)
-    const relativePath = `${filepath}`; // e.g. images/12345-filename.jpg (no leading slash)
-
-    return NextResponse.json({ 
-      success: true, 
-      path: relativePath,
-      filename 
-    });
-  } catch (error: any) {
-    console.error('Upload error:', error);
-    const message = error.response?.data?.message || 'Upload failed';
-    return NextResponse.json(
-      { error: message },
-      { status: error.response?.status || 500 }
-    );
+    return NextResponse.json({ success: true, path, filename: newName });
+  } catch (err: any) {
+    console.error('upload error:', err);
+    const msg = err.response?.data?.message || 'upload failed';
+    return NextResponse.json({ error: msg }, { status: err.response?.status || 500 });
   }
 }
 
 export async function DELETE(request: NextRequest) {
   try {
-    if (!GITHUB_TOKEN) {
+    if (!token) {
       return NextResponse.json({ error: 'GitHub token not configured' }, { status: 500 });
     }
 
-    const body = await request.json();
-    const { fileName } = body;
-
+    const { fileName } = await request.json();
     if (!fileName) {
       return NextResponse.json({ error: 'No file name provided' }, { status: 400 });
     }
 
-    const filepath = `${IMAGES_FOLDER}/${fileName}`;
+    const path = buildPath(imagesDir, fileName);
 
-    // Get SHA of file
-    const getResponse = await axios.get(
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filepath}`,
-      {
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-      }
-    );
+    // get file sha
+    const res = await axios.get(`${gh.baseUrl}/${path}`, { headers: gh.headers });
 
-    // Delete file
-    await axios.delete(
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${filepath}`,
-      {
-        data: {
-          message: `Delete image: ${fileName}`,
-          sha: getResponse.data.sha,
-          branch: 'main',
-        },
-        headers: {
-          Authorization: `token ${GITHUB_TOKEN}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-      }
-    );
+    // delete
+    await axios.delete(`${gh.baseUrl}/${path}`, {
+      data: { message: `Delete: ${fileName}`, sha: res.data.sha, branch: 'main' },
+      headers: gh.headers,
+    });
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
-    console.error('Delete error:', error);
-    const message = error.response?.data?.message || 'Delete failed';
-    return NextResponse.json(
-      { error: message },
-      { status: error.response?.status || 500 }
-    );
+  } catch (err: any) {
+    console.error('delete error:', err);
+    const msg = err.response?.data?.message || 'delete failed';
+    return NextResponse.json({ error: msg }, { status: err.response?.status || 500 });
   }
 }
